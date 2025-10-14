@@ -1,0 +1,7 @@
+numpy
+pandas
+matplotlib
+seaborn
+tensorflow>=2.10
+scikit-learn
+adversarial-robustness-toolbox

@@ -1,0 +1,24 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environment folder (if you use one)
+venv/
+.venv/
+
+# IDE and OS specific files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Generated results - we want the repo to contain the code, not the output
+results/*
+*.png
+*.keras
+*.tflite
+
+# Large data files (optional, but good practice)
+# This prevents you from accidentally uploading huge CSVs to GitHub
+data/*.csv
+data/*.txt
