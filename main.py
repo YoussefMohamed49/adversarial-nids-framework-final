@@ -1,21 +1,38 @@
-# ===================================================================
-# Part 1: Project Setup and All Imports
-# ===================================================================
-import warnings
-warnings.filterwarnings('ignore')
+"""
+Hardening the IoT Edge: A TRADES-based Approach for Robust Network Intrusion Detection
 
+This script implements the experimental framework for evaluating the robustness of 
+Deep Learning-based NIDS against adversarial attacks. It compares a standard baseline 
+model, a PGD Adversarially Trained (PGD-AT) model, and a TRADES-defended model 
+across NSL-KDD and Bot-IoT datasets.
+
+Key Features:
+1. Data Preprocessing with SMOTE for class balancing.
+2. Implementation of TRADES loss function.
+3. Comparative evaluation against PGD, FGSM, and C&W attacks.
+4. Deployment analysis using TensorFlow Lite (Latency/Throughput).
+
+Author: [Your Name]
+Date: 2025
+"""
+
+# ===================================================================
+# 1. Setup and Imports
+# ===================================================================
+import os
+import time
+import random
+import warnings
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import seaborn as sns
+import matplotlib.pyplot as plt
 import tensorflow as tf
-import time
-import os
-import random
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score
+from imblearn.over_sampling import SMOTE
 
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Input, Dropout
@@ -23,45 +40,60 @@ from tensorflow.keras.losses import SparseCategoricalCrossentropy, KLDivergence
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.optimizers import Adam
 
-# Adversarial Robustness Toolbox (ART) imports
-from art.attacks.evasion import FastGradientMethod, ProjectedGradientDescent
+# Adversarial Robustness Toolbox imports
+from art.attacks.evasion import FastGradientMethod, ProjectedGradientDescent, CarliniL2Method
 from art.estimators.classification import TensorFlowV2Classifier
 
-# --- SET SEEDS FOR REPRODUCIBILITY ---
-SEED = 42
-os.environ['PYTHONHASHSEED'] = str(SEED)
-random.seed(SEED)
-np.random.seed(SEED)
-tf.random.set_seed(SEED)
-# --- END OF SEED SETTING ---
 
-print("All libraries imported successfully.")
+warnings.filterwarnings('ignore')
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
+# For reproducibility
+def set_seeds(seed_value=42):
+    """Sets random seeds for reproducibility across numpy, python, and tensorflow."""
+    os.environ['PYTHONHASHSEED'] = str(seed_value)
+    random.seed(seed_value)
+    np.random.seed(seed_value)
+    tf.random.set_seed(seed_value)
+
+set_seeds(42)
 
 # ===================================================================
-# Part 2: Configuration
+# 2. Configuration Parameters
 # ===================================================================
 
-# --- Visual Style Configuration ---
-BASELINE_COLOR = "royalblue"
-ADVT_COLOR = "forestgreen"
+# Experiment Settings
+NUM_RUNS = 1              
+EPOCHS_BASELINE = 15      
+EPOCHS_ADV = 5            
+BATCH_SIZE = 512          
+ATTACK_EPSILON = 0.1      
+
+# Dataset Selection
+# Set to True for Bot-IoT, False for NSL-KDD
+USE_BOT_IOT = True 
+
+# Paths
+# Note: Update this path to point to your local dataset directory
+DATA_PATH_ROOT = "C:/Users/POP/New folder/data/"
+BOT_IOT_FILE = "C:/Users/POP/New folder/reduced_data_4.csv"
+
+# Visualization Settings
 sns.set_theme(style="whitegrid", context="paper", font_scale=1.2)
+tf.config.set_visible_devices([], 'GPU') 
 
-# --- TensorFlow Configuration ---
-tf.config.set_visible_devices([], 'GPU')
-
-# --- Experiment Parameters ---
-ATTACK_EPSILON = 0.1  # Attack strength for evaluation attacks
-
+print("Configuration loaded. Libraries imported successfully.")
 
 # ===================================================================
-# Part 3: Data Loading & Preprocessing 
+# 3. Data Loading & Preprocessing
 # ===================================================================
 
-def load_and_preprocess_nsl_kdd(data_path=''):
-    """ Loads and preprocesses the NSL-KDD dataset. """
-    print("Loading and preprocessing NSL-KDD dataset...")
-    # (Code for NSL-KDD is complete and correct from previous version)
+def load_and_preprocess_nsl_kdd(data_path):
+    """
+    Loads, encodes, scales, and balances the NSL-KDD dataset.
+    """
+    print(f"Loading NSL-KDD dataset from {data_path}...")
+    
     columns = [
         'duration', 'protocol_type', 'service', 'flag', 'src_bytes', 'dst_bytes', 'land',
         'wrong_fragment', 'urgent', 'hot', 'num_failed_logins', 'logged_in', 'num_compromised',
@@ -73,12 +105,26 @@ def load_and_preprocess_nsl_kdd(data_path=''):
         'dst_host_same_src_port_rate', 'dst_host_srv_diff_host_rate', 'dst_host_serror_rate',
         'dst_host_srv_serror_rate', 'dst_host_rerror_rate', 'dst_host_srv_rerror_rate', 'label', 'difficulty'
     ]
-    df_train = pd.read_csv(data_path + 'KDDTrain+.txt', header=None, names=columns)
-    df_test = pd.read_csv(data_path + 'KDDTest+.txt', header=None, names=columns)
-    df_train.drop('difficulty', axis=1, inplace=True); df_test.drop('difficulty', axis=1, inplace=True)
+    
+    train_path = os.path.join(data_path, 'KDDTrain+.txt')
+    test_path = os.path.join(data_path, 'KDDTest+.txt')
+
+    if not os.path.exists(train_path):
+        print(f"Error: Data file not found at {train_path}")
+        return None, None, None, None
+
+    df_train = pd.read_csv(train_path, header=None, names=columns)
+    df_test = pd.read_csv(test_path, header=None, names=columns)
+
+    
+    df_train.drop('difficulty', axis=1, inplace=True)
+    df_test.drop('difficulty', axis=1, inplace=True)
+    
+    # Map specific attack types to broad categories
     label_mapping = {
-        'normal': 'normal', 'back': 'dos', 'land': 'dos', 'neptune': 'dos', 'pod': 'dos', 'smurf': 'dos', 
-        'teardrop': 'dos', 'mailbomb': 'dos', 'apache2': 'dos', 'processtable': 'dos', 'udpstorm': 'dos',
+        'normal': 'normal', 
+        'back': 'dos', 'land': 'dos', 'neptune': 'dos', 'pod': 'dos', 'smurf': 'dos', 'teardrop': 'dos', 
+        'mailbomb': 'dos', 'apache2': 'dos', 'processtable': 'dos', 'udpstorm': 'dos',
         'ipsweep': 'probe', 'nmap': 'probe', 'portsweep': 'probe', 'satan': 'probe', 'mscan': 'probe', 'saint': 'probe',
         'ftp_write': 'r2l', 'guess_passwd': 'r2l', 'imap': 'r2l', 'multihop': 'r2l', 'phf': 'r2l', 'spy': 'r2l',
         'warezclient': 'r2l', 'warezmaster': 'r2l', 'sendmail': 'r2l', 'named': 'r2l', 'snmpgetattack': 'r2l',
@@ -86,52 +132,91 @@ def load_and_preprocess_nsl_kdd(data_path=''):
         'buffer_overflow': 'u2r', 'loadmodule': 'u2r', 'perl': 'u2r', 'rootkit': 'u2r', 'httptunnel': 'u2r',
         'ps': 'u2r', 'sqlattack': 'u2r', 'xterm': 'u2r'
     }
-    df_train['label'] = df_train['label'].map(label_mapping); df_test['label'] = df_test['label'].map(label_mapping)
-    df_train.dropna(inplace=True); df_test.dropna(inplace=True)
+    
+    df_train['label'] = df_train['label'].map(label_mapping)
+    df_test['label'] = df_test['label'].map(label_mapping)
+    
+   
+    df_train.dropna(inplace=True)
+    df_test.dropna(inplace=True)
+    
+    # One-Hot Encoding
     categorical_cols = ['protocol_type', 'service', 'flag']
     df_full = pd.concat([df_train, df_test], axis=0)
     df_full_encoded = pd.get_dummies(df_full, columns=categorical_cols)
-    df_train_encoded = df_full_encoded.iloc[:len(df_train)]; df_test_encoded = df_full_encoded.iloc[len(df_train):]
+    
+    df_train_encoded = df_full_encoded.iloc[:len(df_train)]
+    df_test_encoded = df_full_encoded.iloc[len(df_train):]
+    
+    # Label Encoding
     label_encoder = LabelEncoder()
-    X_train = df_train_encoded.drop('label', axis=1); y_train = label_encoder.fit_transform(df_train_encoded['label'])
-    X_test = df_test_encoded.drop('label', axis=1); y_test = label_encoder.transform(df_test_encoded['label'])
+    y_train = label_encoder.fit_transform(df_train_encoded['label'])
+    y_test = label_encoder.transform(df_test_encoded['label'])
+    
+    X_train = df_train_encoded.drop('label', axis=1)
+    X_test = df_test_encoded.drop('label', axis=1)
+    
+    # Class Balancing via SMOTE
+    print(f"  [Pre-SMOTE] Training set size: {X_train.shape[0]}")
+    smote = SMOTE(random_state=42)
+    X_train, y_train = smote.fit_resample(X_train, y_train)
+    print(f"  [Post-SMOTE] Training set size: {X_train.shape[0]}")
+    
+    # Feature Scaling
     scaler = MinMaxScaler()
-    X_train = scaler.fit_transform(X_train); X_test = scaler.transform(X_test)
-    print("NSL-KDD dataset loaded and preprocessed successfully.")
+    X_train = scaler.fit_transform(X_train)
+    X_test = scaler.transform(X_test)
+    
     return (X_train.astype(np.float32), y_train), (X_test.astype(np.float32), y_test), label_encoder.classes_, X_train.shape[1]
 
 def load_and_preprocess_bot_iot(file_path, sample_size=200000):
-    """ Loads the full Bot-IoT dataset and takes a stratified sample. """
-    print(f"Loading and preprocessing Bot-IoT dataset from: {file_path}...")
-    # (Code for Bot-IoT is complete and correct from previous version)
+    """
+    Loads, preprocesses, and splits the Bot-IoT dataset.
+    """
+    print(f"Loading Bot-IoT dataset from {file_path}...")
+    
     try:
         df_full = pd.read_csv(file_path, low_memory=False)
-        if sample_size > len(df_full): sample_size = len(df_full)
-        df, _ = train_test_split(df_full, train_size=sample_size, stratify=df_full['category'], random_state=SEED)
-        del df_full
+        # Stratified sampling for efficiency
+        if sample_size > len(df_full): 
+            sample_size = len(df_full)
+        df, _ = train_test_split(df_full, train_size=sample_size, stratify=df_full['category'], random_state=42)
     except FileNotFoundError:
-        print(f"Error: The file was not found at {file_path}"); return None, None, None, None
+        print(f"Error: File not found at {file_path}")
+        return None, None, None, None
+
+    # Drop irrelevant identifier columns
     cols_to_drop = ['pkSeqID', 'stime', 'flgs', 'saddr', 'daddr', 'sport', 'dport', 'attack', 'category', 'subcategory']
-    X = df.drop(columns=cols_to_drop, errors='ignore'); y = df['category']
+    X = df.drop(columns=cols_to_drop, errors='ignore')
+    y = df['category']
+    
+    # Encoding
     categorical_features = X.select_dtypes(include=['object']).columns
     numerical_features = X.select_dtypes(include=np.number).columns
     X = pd.get_dummies(X, columns=categorical_features, dummy_na=False)
+    
+    # Scaling
     scaler = MinMaxScaler()
     valid_numerical_features = [col for col in numerical_features if col in X.columns]
     X[valid_numerical_features] = scaler.fit_transform(X[valid_numerical_features])
+    
+    # Label Encoding
     label_encoder = LabelEncoder()
     y_encoded = label_encoder.fit_transform(y)
-    X_train, X_test, y_train, y_test = train_test_split(X, y_encoded, test_size=0.2, random_state=SEED, stratify=y_encoded)
-    print("Bot-IoT dataset loaded and preprocessed successfully.")
+    
+    # Train/Test Split
+    X_train, X_test, y_train, y_test = train_test_split(X, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded)
+    
     return (X_train.to_numpy(dtype=np.float32), y_train), (X_test.to_numpy(dtype=np.float32), y_test), label_encoder.classes_, X_train.shape[1]
 
-
 # ===================================================================
-# Part 4: Model Architecture and Training 
+# 4. Model Definition
 # ===================================================================
 
-def create_powerful_mlp(input_shape, num_classes):
-    """ Creates a powerful Keras MLP model for complex datasets. """
+def create_mlp_model(input_shape, num_classes):
+    """
+    Creates a standardized Multi-Layer Perceptron (MLP) for NIDS.
+    """
     model = Sequential([
         Input(shape=(input_shape,)),
         Dense(256, activation='relu'), Dropout(0.4),
@@ -142,159 +227,231 @@ def create_powerful_mlp(input_shape, num_classes):
     model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
     return model
 
-early_stopper = EarlyStopping(monitor='val_loss', patience=10, verbose=1, restore_best_weights=True)
-
-
 # ===================================================================
-# Part 5: Main Experiment Workflow
+# 5. Main Experiment Execution
 # ===================================================================
 
-# --- CHOOSE YOUR DATASET ---
-USE_BOT_IOT = False # Set to True for Bot-IoT, False for NSL-KDD
-
-if USE_BOT_IOT:
-    file_path = 'data/Bot-IoT.csv' 
-    (X_train, y_train), (X_test, y_test), class_names, input_shape_dim = load_and_preprocess_bot_iot(file_path)
-    DATASET_NAME = "Bot-IoT"
-else:
-    (X_train, y_train), (X_test, y_test), class_names, input_shape_dim = load_and_preprocess_nsl_kdd(data_path='data/')
-    DATASET_NAME = "NSL-KDD"
-
-if X_train is None:
-    print("\nData loading failed. Exiting script.")
-else:
-    num_classes = len(class_names)
-    print(f"\nDataset is ready: {DATASET_NAME}. Input shape: {input_shape_dim}, Classes: {num_classes}")
-
-    # --- Train Baseline Model ---
-    print("\n--- Training Baseline Model ---")
-    baseline_model = create_powerful_mlp(input_shape_dim, num_classes)
-    baseline_model.fit(
-        X_train, y_train, epochs=100, batch_size=256,
-        validation_split=0.2, callbacks=[early_stopper], verbose=1
-    )
-
-    # --- Train Defended Model (via TRADES) ---
-    print("\n--- Training Defended Model (via TRADES) ---")
-    trades_model = create_powerful_mlp(input_shape_dim, num_classes)
-    EPOCHS_TRADES = 30; BATCH_SIZE_TRADES = 256; LEARNING_RATE_TRADES = 0.001; BETA = 1.0
-    train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train)).shuffle(len(X_train), seed=SEED).batch(BATCH_SIZE_TRADES)
-    optimizer = Adam(learning_rate=LEARNING_RATE_TRADES)
-    loss_fn_clean = SparseCategoricalCrossentropy(from_logits=False)
-    loss_fn_robust = KLDivergence()
-    art_classifier_for_trades = TensorFlowV2Classifier(
-        model=trades_model, nb_classes=num_classes, input_shape=(input_shape_dim,),
-        loss_object=loss_fn_clean, clip_values=(0, 1)
-    )
-    pgd_attack_for_trades = ProjectedGradientDescent(estimator=art_classifier_for_trades, eps=0.1, eps_step=0.01, max_iter=10)
-    for epoch in range(EPOCHS_TRADES):
-        print(f"Epoch {epoch + 1}/{EPOCHS_TRADES}")
-        epoch_loss_avg = tf.keras.metrics.Mean()
-        for x_batch, y_batch in train_dataset:
-            with tf.GradientTape() as tape:
-                x_batch_adv = pgd_attack_for_trades.generate(x=x_batch.numpy())
-                logits_clean = trades_model(x_batch, training=True)
-                logits_adv = trades_model(x_batch_adv, training=True)
-                loss_natural = loss_fn_clean(y_batch, logits_clean)
-                loss_robust = loss_fn_robust(tf.nn.softmax(logits_clean), tf.nn.softmax(logits_adv))
-                total_loss = loss_natural + (BETA * loss_robust)
-            grads = tape.gradient(total_loss, trades_model.trainable_variables)
-            optimizer.apply_gradients(zip(grads, trades_model.trainable_variables))
-            epoch_loss_avg.update_state(total_loss)
-        print(f"  Average Loss: {epoch_loss_avg.result():.4f}")
-    print("TRADES training complete.")
-
-    # ===================================================================
-    # Part 6: Systematic Evaluation
-    # ===================================================================
-    print("\n" + "="*50); print("Starting Systematic Evaluation"); print("="*50)
-    models_to_test = { "Baseline": baseline_model, "TRADES": trades_model }
-    results = {}
-    for model_name, model in models_to_test.items():
-        print(f"\n--- Evaluating Model: {model_name} ---")
-        results[model_name] = {}
-        art_classifier = TensorFlowV2Classifier(
-            model=model, nb_classes=num_classes, input_shape=(input_shape_dim,),
-            loss_object=SparseCategoricalCrossentropy(), clip_values=(0, 1)
-        )
-        # Test on Clean Data
-        y_pred_clean = np.argmax(model.predict(X_test, verbose=0), axis=1)
-        results[model_name]["Clean"] = classification_report(y_test, y_pred_clean, target_names=class_names, output_dict=True, zero_division=0)
-        print(f"Accuracy on Clean Data: {results[model_name]['Clean']['accuracy']:.4f}")
-        # Test on PGD Attack
-        attack_pgd = ProjectedGradientDescent(estimator=art_classifier, eps=ATTACK_EPSILON, max_iter=10)
-        X_test_adv_pgd = attack_pgd.generate(x=X_test)
-        y_pred_pgd = np.argmax(model.predict(X_test_adv_pgd, verbose=0), axis=1)
-        results[model_name]["PGD"] = classification_report(y_test, y_pred_pgd, target_names=class_names, output_dict=True, zero_division=0)
-        print(f"Accuracy under PGD Attack (eps={ATTACK_EPSILON}): {results[model_name]['PGD']['accuracy']:.4f}")
-    print("\nExperiment finished.")
+if __name__ == "__main__":
     
-    # ===================================================================
-    # Part 7: Visualizations
-    # ===================================================================
-    print("Generating visualizations...")
-    # --- Figure 1: Overall Accuracy Comparison ---
-    plot_data = []
-    for model_name, conditions in results.items():
-        for condition_name, report in conditions.items():
-            plot_data.append({'Model': model_name, 'Condition': condition_name, 'Accuracy': report['accuracy']})
-    df_plot = pd.DataFrame(plot_data)
-    plt.figure(figsize=(8, 6))
-    sns.barplot(x='Condition', y='Accuracy', hue='Model', data=df_plot, palette=[BASELINE_COLOR, ADVT_COLOR])
-    plt.title(f'Overall Model Accuracy on {DATASET_NAME}', fontsize=16)
-    plt.xlabel('Test Data Condition'); plt.ylabel('Accuracy'); plt.ylim(0, 1.0)
-    plt.savefig(f'{DATASET_NAME}_overall_accuracy.png', dpi=300); plt.show()
+    # --- Load Data ---
+    if USE_BOT_IOT:
+        data_res = load_and_preprocess_bot_iot(BOT_IOT_FILE)
+        DATASET_NAME = "Bot-IoT"
+    else:
+        data_res = load_and_preprocess_nsl_kdd(DATA_PATH_ROOT)
+        DATASET_NAME = "NSL-KDD"
 
-    # --- Figure 2: Per-Class F1-Score Bar Chart (Under PGD Attack) ---
-    f1_pgd_data = []
-    for model_name, report in results.items():
-        for class_name in class_names:
-            f1_pgd_data.append({
-                'Model': model_name,
-                'Class': class_name,
-                'F1-Score': report['PGD'][class_name]['f1-score']
-            })
-    df_f1_pgd = pd.DataFrame(f1_pgd_data)
-    plt.figure(figsize=(10, 6))
-    sns.barplot(x='Class', y='F1-Score', hue='Model', data=df_f1_pgd, palette=[BASELINE_COLOR, ADVT_COLOR])
-    plt.title(f'Per-Class F1-Score under PGD Attack on {DATASET_NAME}', fontsize=16)
-    plt.xlabel('Attack Class'); plt.ylabel('F1-Score'); plt.ylim(0, 1.0)
-    plt.xticks(rotation=45, ha='right'); plt.tight_layout()
-    plt.savefig(f'{DATASET_NAME}_f1_scores_pgd.png', dpi=300); plt.show()
+    X_train, y_train = data_res[0]
+    X_test, y_test = data_res[1]
+    class_names = data_res[2]
+    input_dim = data_res[3]
 
-    # --- Figure 3: Accuracy vs. Robustness Trade-off Plot ---
-    tradeoff_data = []
-    for model_name, reports in results.items():
-        tradeoff_data.append({
-            'Model': model_name,
-            'Robustness (PGD Accuracy)': reports['PGD']['accuracy'],
-            'Standard Accuracy (Clean)': reports['Clean']['accuracy']
-        })
-    df_tradeoff = pd.DataFrame(tradeoff_data)
-    plt.figure(figsize=(8, 6))
-    sns.scatterplot(data=df_tradeoff, x='Robustness (PGD Accuracy)', y='Standard Accuracy (Clean)', hue='Model', palette=[BASELINE_COLOR, ADVT_COLOR], s=200, style='Model', markers=['X', 'o'])
-    plt.title(f'Accuracy vs. Robustness Trade-off on {DATASET_NAME}', fontsize=16)
-    plt.xlim(0, 1.05); plt.ylim(0, 1.05)
-    plt.grid(True); plt.tight_layout()
-    plt.savefig(f'{DATASET_NAME}_tradeoff_plot.png', dpi=300); plt.show()
+    if X_train is not None:
+        num_classes = len(class_names)
+        
+        # Dictionary to store performance metrics across runs
+        stats = {
+            "Baseline": {"Clean": [], "PGD": []},
+            "TRADES":   {"Clean": [], "PGD": []}
+        }
+        if DATASET_NAME == "NSL-KDD":
+            stats["PGD-AT"] = {"Clean": [], "PGD": []}
 
-    # ===================================================================
-    # Part 8: IoT Deployment Preparation & Model Complexity
-    # ===================================================================
-    print("\n--- Preparing final model for IoT deployment ---")
-    deployment_model = trades_model
-    deployment_model.save(f'defended_{DATASET_NAME}_model.keras')
-    converter = tf.lite.TFLiteConverter.from_keras_model(deployment_model)
-    converter.optimizations = [tf.lite.Optimize.DEFAULT]
-    tflite_model = converter.convert()
-    with open(f'defended_{DATASET_NAME}_model.tflite', 'wb') as f:
-        f.write(tflite_model)
-    print("Model successfully converted to TensorFlow Lite format.")
+        print(f"\nStarting experiment on {DATASET_NAME} with {NUM_RUNS} run(s)...")
 
-    print("\n--- Analyzing Model Complexity ---")
-    from tensorflow.python.profiler.model_analyzer import profile
-    from tensorflow.python.profiler.option_builder import ProfileOptionBuilder
-    forward_pass = tf.function(deployment_model.call, input_signature=[tf.TensorSpec(shape=(1,) + deployment_model.input_shape[1:])])
-    graph_info = profile(forward_pass.get_concrete_function().graph, options=ProfileOptionBuilder.float_operation())
-    flops = graph_info.total_float_ops
-    print(f"Model Complexity: {flops / 1e6:.2f} MFLOPs")
+        for run in range(NUM_RUNS):
+            print(f"\n--- Run {run + 1}/{NUM_RUNS} ---")
+            set_seeds(42 + run)
+            
+            # -------------------------------------------------------
+            # A. Train Baseline Model
+            # -------------------------------------------------------
+            print("Training Standard Baseline Model...")
+            base_model = create_mlp_model(input_dim, num_classes)
+            base_model.fit(
+                X_train, y_train, 
+                epochs=EPOCHS_BASELINE, 
+                batch_size=BATCH_SIZE, 
+                validation_split=0.2, 
+                verbose=0, 
+                callbacks=[EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)]
+            )
+            
+            # -------------------------------------------------------
+            # B. Train PGD-AT Model (Optional: NSL-KDD Only)
+            # -------------------------------------------------------
+            pgd_at_model = None
+            if DATASET_NAME == "NSL-KDD":
+                print("Training PGD Adversarial Training (PGD-AT) Model...")
+                pgd_at_model = create_mlp_model(input_dim, num_classes)
+                loss_fn = SparseCategoricalCrossentropy()
+                
+                # Wrap model for ART
+                clf_at = TensorFlowV2Classifier(model=pgd_at_model, nb_classes=num_classes, input_shape=(input_dim,), loss_object=loss_fn, clip_values=(0,1))
+                atk_at = ProjectedGradientDescent(estimator=clf_at, eps=ATTACK_EPSILON, max_iter=10)
+                
+                # Custom Training Loop for PGD-AT
+                ds = tf.data.Dataset.from_tensor_slices((X_train, y_train)).shuffle(len(X_train)).batch(BATCH_SIZE)
+                optimizer = Adam(0.001)
+                
+                for epoch in range(EPOCHS_ADV): 
+                    print(f"  > PGD-AT Epoch {epoch+1}/{EPOCHS_ADV}")
+                    for x_batch, y_batch in ds:
+                        # Generate adversarial examples on the fly
+                        x_adv = atk_at.generate(x=x_batch.numpy())
+                        with tf.GradientTape() as tape:
+                            loss = loss_fn(y_batch, pgd_at_model(x_adv, training=True))
+                        grads = tape.gradient(loss, pgd_at_model.trainable_variables)
+                        optimizer.apply_gradients(zip(grads, pgd_at_model.trainable_variables))
+
+            # -------------------------------------------------------
+            # C. Train TRADES Model
+            # -------------------------------------------------------
+            print("Training TRADES Defended Model...")
+            trades_model = create_mlp_model(input_dim, num_classes)
+            loss_c = SparseCategoricalCrossentropy(from_logits=False)
+            loss_r = KLDivergence()
+            
+            # Wrap model for ART
+            clf_trades = TensorFlowV2Classifier(model=trades_model, nb_classes=num_classes, input_shape=(input_dim,), loss_object=loss_c, clip_values=(0,1))
+            atk_trades = ProjectedGradientDescent(estimator=clf_trades, eps=ATTACK_EPSILON, max_iter=10)
+            
+            # Custom Training Loop for TRADES
+            ds = tf.data.Dataset.from_tensor_slices((X_train, y_train)).shuffle(len(X_train)).batch(BATCH_SIZE)
+            optimizer = Adam(0.001)
+            
+            for epoch in range(EPOCHS_ADV):
+                print(f"  > TRADES Epoch {epoch+1}/{EPOCHS_ADV}")
+                for x_batch, y_batch in ds:
+                    with tf.GradientTape() as tape:
+                        # 1. Generate adversarial example
+                        x_adv = atk_trades.generate(x=x_batch.numpy())
+                        
+                        # 2. Forward pass clean and adv
+                        logits_clean = trades_model(x_batch, training=True)
+                        logits_adv = trades_model(x_adv, training=True)
+                        
+                        # 3. Calculate TRADES loss: Clean Acc + Beta * Consistency
+                        loss = loss_c(y_batch, logits_clean) + loss_r(tf.nn.softmax(logits_clean), tf.nn.softmax(logits_adv))
+                    
+                    grads = tape.gradient(loss, trades_model.trainable_variables)
+                    optimizer.apply_gradients(zip(grads, trades_model.trainable_variables))
+            
+            # -------------------------------------------------------
+            # D. Evaluation Phase
+            # -------------------------------------------------------
+            models = {"Baseline": base_model, "TRADES": trades_model}
+            if pgd_at_model: models["PGD-AT"] = pgd_at_model
+            
+            # Create evaluation subset for efficiency
+            idx = np.random.choice(len(X_test), 500, replace=False)
+            X_eval, y_eval = X_test[idx], y_test[idx]
+            
+            for name, model in models.items():
+                # 1. Standard Accuracy
+                clean_pred = np.argmax(model.predict(X_test, verbose=0), axis=1)
+                clean_acc = accuracy_score(y_test, clean_pred)
+                stats[name]["Clean"].append(clean_acc)
+                
+                # 2. Robust Accuracy (PGD)
+                # Create a fresh classifier wrapper for evaluation
+                eval_clf = TensorFlowV2Classifier(model=model, nb_classes=num_classes, input_shape=(input_dim,), loss_object=loss_c, clip_values=(0,1))
+                eval_pgd = ProjectedGradientDescent(estimator=eval_clf, eps=ATTACK_EPSILON, max_iter=10, verbose=False)
+                
+                x_test_adv = eval_pgd.generate(X_eval)
+                robust_pred = np.argmax(model.predict(x_test_adv, verbose=0), axis=1)
+                robust_acc = accuracy_score(y_eval, robust_pred)
+                
+                stats[name]["PGD"].append(robust_acc)
+        
+        # ===================================================================
+        # 6. Reporting Results
+        # ===================================================================
+        print("\n" + "="*40)
+        print(" FINAL STATISTICAL REPORT ")
+        print("="*40)
+        print(f"{'Model':<15} | {'Clean Accuracy':<20} | {'Robust Accuracy (PGD)':<20}")
+        print("-" * 65)
+        
+        for name, m in stats.items():
+            cm, cs = np.mean(m["Clean"]), np.std(m["Clean"])
+            pm, ps = np.mean(m["PGD"]), np.std(m["PGD"])
+            print(f"{name:<15} | {cm:.4f} +/- {cs:.4f}   | {pm:.4f} +/- {ps:.4f}")
+
+        # ===================================================================
+        # 7. Expanded Attack Evaluation (FGSM & C&W)
+        # ===================================================================
+        print("\n" + "="*40)
+        print(" CROSS-ATTACK GENERALIZATION (FGSM & C&W) ")
+        print("="*40)
+        
+        # Subset for attack evaluation
+        eval_size = 200 
+        idx = np.random.choice(len(X_test), eval_size, replace=False)
+        X_sub, y_sub = X_test[idx], y_test[idx]
+        
+        eval_models = {"Baseline": base_model, "TRADES": trades_model}
+        if 'pgd_at_model' in locals() and pgd_at_model is not None:
+            eval_models["PGD-AT"] = pgd_at_model
+            
+        loss_fn = SparseCategoricalCrossentropy()
+
+        for name, model in eval_models.items():
+            print(f"\n--- Evaluating {name} ---")
+            classifier = TensorFlowV2Classifier(model=model, nb_classes=num_classes, input_shape=(input_dim,), loss_object=loss_fn, clip_values=(0, 1))
+
+            # FGSM Evaluation
+            attacker_fgsm = FastGradientMethod(classifier, eps=ATTACK_EPSILON)
+            x_fgsm = attacker_fgsm.generate(x=X_sub)
+            acc_fgsm = accuracy_score(y_sub, np.argmax(model.predict(x_fgsm, verbose=0), axis=1))
+            print(f"  FGSM Accuracy: {acc_fgsm:.4f}")
+
+            # C&W Evaluation
+            attacker_cw = CarliniL2Method(classifier, confidence=0.0, max_iter=10, batch_size=32, verbose=False)
+            x_cw = attacker_cw.generate(x=X_sub)
+            acc_cw = accuracy_score(y_sub, np.argmax(model.predict(x_cw, verbose=0), axis=1))
+            print(f"  C&W Accuracy:  {acc_cw:.4f}")
+
+        # ===================================================================
+        # 8. Deployment Feasibility Analysis
+        # ===================================================================
+        print("\n" + "="*40)
+        print(" EDGE DEPLOYMENT ANALYSIS (LATENCY) ")
+        print("="*40)
+        
+        # Convert TRADES model to TFLite with Optimization
+        converter = tf.lite.TFLiteConverter.from_keras_model(trades_model)
+        converter.optimizations = [tf.lite.Optimize.DEFAULT]
+        tflite_model = converter.convert()
+        
+        # Setup Interpreter
+        interpreter = tf.lite.Interpreter(model_content=tflite_model)
+        interpreter.allocate_tensors()
+        input_details = interpreter.get_input_details()
+        dummy_input = np.array(np.random.random_sample(input_details[0]['shape']), dtype=np.float32)
+        
+        # Warmup phase
+        for _ in range(50): 
+            interpreter.set_tensor(input_details[0]['index'], dummy_input)
+            interpreter.invoke()
+        
+        # Measurement phase
+        num_iterations = 1000
+        start_time = time.perf_counter()
+        for _ in range(num_iterations):
+            interpreter.set_tensor(input_details[0]['index'], dummy_input)
+            interpreter.invoke()
+        end_time = time.perf_counter()
+        
+        avg_latency_ms = ((end_time - start_time) * 1000) / num_iterations
+        throughput = 1000 / avg_latency_ms
+        
+        print(f"TRADES TFLite Latency: {avg_latency_ms:.4f} ms/packet")
+        print(f"Projected Throughput:  {throughput:.2f} packets/sec")
+        
+        if avg_latency_ms < 1.0:
+            print(">> Verdict: Suitable for Real-Time Edge IoT Applications")
+        else:
+            print(">> Verdict: Suitable for Near-Real-Time IoT Applications")
+            
+        print("\nExperiment Complete.")
