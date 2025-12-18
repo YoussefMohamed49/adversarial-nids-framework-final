@@ -31,10 +31,11 @@ import tensorflow as tf
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.manifold import TSNE
 from imblearn.over_sampling import SMOTE
 
-from tensorflow.keras.models import Sequential
+from tensorflow.keras.models import Sequential, Model
 from tensorflow.keras.layers import Dense, Input, Dropout
 from tensorflow.keras.losses import SparseCategoricalCrossentropy, KLDivergence
 from tensorflow.keras.callbacks import EarlyStopping
@@ -43,7 +44,6 @@ from tensorflow.keras.optimizers import Adam
 # Adversarial Robustness Toolbox imports
 from art.attacks.evasion import FastGradientMethod, ProjectedGradientDescent, CarliniL2Method
 from art.estimators.classification import TensorFlowV2Classifier
-
 
 warnings.filterwarnings('ignore')
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -71,7 +71,7 @@ ATTACK_EPSILON = 0.1
 
 # Dataset Selection
 # Set to True for Bot-IoT, False for NSL-KDD
-USE_BOT_IOT = True 
+USE_BOT_IOT = False  
 
 # Paths
 # Note: Update this path to point to your local dataset directory
@@ -136,7 +136,7 @@ def load_and_preprocess_nsl_kdd(data_path):
     df_train['label'] = df_train['label'].map(label_mapping)
     df_test['label'] = df_test['label'].map(label_mapping)
     
-   
+    
     df_train.dropna(inplace=True)
     df_test.dropna(inplace=True)
     
@@ -226,6 +226,111 @@ def create_mlp_model(input_shape, num_classes):
     ])
     model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
     return model
+
+# ===================================================================
+# 4.1  Analysis Functions
+# ===================================================================
+
+def plot_epsilon_curve(model, X_eval, y_eval, input_dim, num_classes, dataset_name):
+    """Plots accuracy degradation across increasing epsilon values."""
+    epsilons = [0.0, 0.01, 0.05, 0.1, 0.15, 0.2, 0.25]
+    accuracies = []
+    
+    print("\n--- Generating Epsilon Sensitivity Curve ---")
+    loss_object = tf.keras.losses.SparseCategoricalCrossentropy()
+    classifier = TensorFlowV2Classifier(model=model, nb_classes=num_classes, 
+                                        input_shape=(input_dim,), loss_object=loss_object, 
+                                        clip_values=(0, 1))
+    
+    for eps in epsilons:
+        if eps == 0.0:
+            acc = accuracy_score(y_eval, np.argmax(model.predict(X_eval, verbose=0), axis=1))
+        else:
+            attacker = ProjectedGradientDescent(estimator=classifier, eps=eps, max_iter=10, verbose=False)
+            x_adv = attacker.generate(X_eval)
+            acc = accuracy_score(y_eval, np.argmax(model.predict(x_adv, verbose=0), axis=1))
+        
+        accuracies.append(acc)
+        print(f"Epsilon: {eps} -> Accuracy: {acc:.4f}")
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(epsilons, accuracies, marker='o', linewidth=2, label='TRADES Model')
+    plt.title(f'Robustness vs. Attack Strength (Epsilon) on {dataset_name}')
+    plt.xlabel('Perturbation Budget (Epsilon)')
+    plt.ylabel('Model Accuracy')
+    plt.grid(True)
+    plt.legend()
+    plt.savefig('epsilon_curve.png')
+    plt.show()
+
+def plot_adversarial_confusion_matrix(model, X_eval, y_eval, input_dim, num_classes, class_names):
+    """Plots confusion matrix specifically for PGD-attacked data."""
+    print("\n--- Generating Adversarial Confusion Matrix ---")
+    loss_object = tf.keras.losses.SparseCategoricalCrossentropy()
+    classifier = TensorFlowV2Classifier(model=model, nb_classes=num_classes, 
+                                        input_shape=(input_dim,), loss_object=loss_object, 
+                                        clip_values=(0, 1))
+    
+    # Generate Attack
+    attacker = ProjectedGradientDescent(estimator=classifier, eps=0.1, max_iter=10, verbose=False)
+    x_adv = attacker.generate(X_eval)
+    
+    # Predictions
+    y_pred = np.argmax(model.predict(x_adv, verbose=0), axis=1)
+    
+    # Generate Matrix
+    cm = confusion_matrix(y_eval, y_pred)
+    
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                xticklabels=class_names, yticklabels=class_names)
+    plt.title('Confusion Matrix under PGD Attack (TRADES Model)')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.tight_layout()
+    plt.savefig('adv_confusion_matrix.png')
+    plt.show()
+
+def plot_tsne_clusters(model, X_eval, y_eval, input_dim, num_classes):
+    """Visualizes the latent space of Clean vs Adversarial examples using t-SNE."""
+    print("\n--- Generating t-SNE Latent Space Visualization ---")
+    
+    # Create feature extractor (Penultimate Layer)
+    feature_extractor = Model(inputs=model.input, outputs=model.layers[-2].output)
+    
+    # Get Clean Features
+    features_clean = feature_extractor.predict(X_eval, verbose=0)
+    
+    # Get Adversarial Features
+    loss_object = tf.keras.losses.SparseCategoricalCrossentropy()
+    classifier = TensorFlowV2Classifier(model=model, nb_classes=num_classes, 
+                                        input_shape=(input_dim,), loss_object=loss_object, 
+                                        clip_values=(0, 1))
+    attacker = ProjectedGradientDescent(estimator=classifier, eps=0.1, max_iter=10, verbose=False)
+    x_adv = attacker.generate(X_eval)
+    features_adv = feature_extractor.predict(x_adv, verbose=0)
+    
+    # Combine for t-SNE
+    combined_features = np.vstack([features_clean, features_adv])
+    
+    # Run t-SNE
+    tsne = TSNE(n_components=2, random_state=42, perplexity=30)
+    tsne_results = tsne.fit_transform(combined_features)
+    
+    # Split back
+    half = len(features_clean)
+    tsne_clean = tsne_results[:half]
+    tsne_adv = tsne_results[half:]
+    
+    # Plot
+    plt.figure(figsize=(10, 8))
+    plt.scatter(tsne_clean[:, 0], tsne_clean[:, 1], c='blue', alpha=0.5, label='Clean Samples')
+    plt.scatter(tsne_adv[:, 0], tsne_adv[:, 1], c='red', alpha=0.5, marker='x', label='Adversarial Samples')
+    
+    plt.title('Latent Space (t-SNE): Clean vs Adversarial Samples')
+    plt.legend()
+    plt.savefig('tsne_analysis.png')
+    plt.show()
 
 # ===================================================================
 # 5. Main Experiment Execution
@@ -320,8 +425,17 @@ if __name__ == "__main__":
             ds = tf.data.Dataset.from_tensor_slices((X_train, y_train)).shuffle(len(X_train)).batch(BATCH_SIZE)
             optimizer = Adam(0.001)
             
+            # Metric trackers for plotting
+            history_clean_loss = []
+            history_robust_loss = []
+            
             for epoch in range(EPOCHS_ADV):
                 print(f"  > TRADES Epoch {epoch+1}/{EPOCHS_ADV}")
+                
+                # Epoch accumulators
+                epoch_clean_loss_avg = tf.keras.metrics.Mean()
+                epoch_robust_loss_avg = tf.keras.metrics.Mean()
+
                 for x_batch, y_batch in ds:
                     with tf.GradientTape() as tape:
                         # 1. Generate adversarial example
@@ -332,10 +446,31 @@ if __name__ == "__main__":
                         logits_adv = trades_model(x_adv, training=True)
                         
                         # 3. Calculate TRADES loss: Clean Acc + Beta * Consistency
-                        loss = loss_c(y_batch, logits_clean) + loss_r(tf.nn.softmax(logits_clean), tf.nn.softmax(logits_adv))
+                        l_clean = loss_c(y_batch, logits_clean)
+                        l_robust = loss_r(tf.nn.softmax(logits_clean), tf.nn.softmax(logits_adv))
+                        loss = l_clean + l_robust
                     
                     grads = tape.gradient(loss, trades_model.trainable_variables)
                     optimizer.apply_gradients(zip(grads, trades_model.trainable_variables))
+                    
+                    # Update trackers
+                    epoch_clean_loss_avg.update_state(l_clean)
+                    epoch_robust_loss_avg.update_state(l_robust)
+                
+                # Store epoch averages
+                history_clean_loss.append(epoch_clean_loss_avg.result().numpy())
+                history_robust_loss.append(epoch_robust_loss_avg.result().numpy())
+
+            # Plot Training Dynamics
+            plt.figure(figsize=(10, 5))
+            plt.plot(history_clean_loss, label='Standard Accuracy Loss')
+            plt.plot(history_robust_loss, label='Robustness (KL) Loss', linestyle='--')
+            plt.title('TRADES Training Dynamics: Accuracy vs. Stability')
+            plt.xlabel('Epochs')
+            plt.ylabel('Loss Value')
+            plt.legend()
+            plt.savefig('trades_loss_dynamics.png')
+            plt.show()
             
             # -------------------------------------------------------
             # D. Evaluation Phase
@@ -376,7 +511,7 @@ if __name__ == "__main__":
         for name, m in stats.items():
             cm, cs = np.mean(m["Clean"]), np.std(m["Clean"])
             pm, ps = np.mean(m["PGD"]), np.std(m["PGD"])
-            print(f"{name:<15} | {cm:.4f} +/- {cs:.4f}   | {pm:.4f} +/- {ps:.4f}")
+            print(f"{name:<15} | {cm:.4f} +/- {cs:.4f}    | {pm:.4f} +/- {ps:.4f}")
 
         # ===================================================================
         # 7. Expanded Attack Evaluation (FGSM & C&W)
@@ -454,4 +589,21 @@ if __name__ == "__main__":
         else:
             print(">> Verdict: Suitable for Near-Real-Time IoT Applications")
             
-        print("\nExperiment Complete.")
+        print("\n" + "="*40)
+        print(" GENERATING ENHANCED ANALYTICAL VISUALIZATIONS ")
+        print("="*40)
+        
+        # Use a fresh subset for visualization
+        plot_idx = np.random.choice(len(X_test), 200, replace=False)
+        X_plot, y_plot = X_test[plot_idx], y_test[plot_idx]
+
+        # 1. Epsilon Curve
+        plot_epsilon_curve(trades_model, X_plot, y_plot, input_dim, num_classes, DATASET_NAME)
+
+        # 2. Adversarial Confusion Matrix
+        plot_adversarial_confusion_matrix(trades_model, X_plot, y_plot, input_dim, num_classes, class_names)
+        
+        # 3. t-SNE Visualization
+        plot_tsne_clusters(trades_model, X_plot, y_plot, input_dim, num_classes)
+        
+        print("\nExperiment and Enhanced Analysis Complete.")
