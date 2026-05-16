@@ -1,54 +1,120 @@
 # Adversarial Defense Framework for Network Intrusion Detection
 
-This repository contains a Python framework for evaluating the robustness of Neural Network-based Network Intrusion Detection Systems (NIDS) against adversarial attacks. It implements a baseline model and a defensively trained model using TRADES, and evaluates them on the NSL-KDD and Bot-IoT datasets.
+This repository provides a Python implementation of a TRADES-based adversarial defense framework for deep-learning-based Network Intrusion Detection Systems (NIDS). The framework evaluates clean accuracy, adversarial robustness, and edge-deployment feasibility using TensorFlow, TensorFlow Lite, and the Adversarial Robustness Toolbox.
 
-## Features
-- **Two Datasets**: Supports both **NSL-KDD** and **Bot-IoT**.
-- **Baseline Model**: A standard Multi-Layer Perceptron (MLP) for classification.
-- **Defended Model**: An MLP trained with the **TRADES** (TRadeoff-inspired Adversarial DEfense via Surrogate loss) method for improved robustness.
-- **Systematic Evaluation**: Compares model performance on both clean and adversarial data (PGD attacks).
-- **Visualizations**: Generates plots for accuracy comparison, per-class F1-scores, and the accuracy-robustness trade-off.
-- **IoT Deployment**: Prepares and converts the final defended model to a TensorFlow Lite (`.tflite`) format for resource-constrained devices.
+## Overview
 
-## Project Structure
-adversarial-nids-framework/
-├── data/               # Place datasets (e.g., KDDTrain+.txt, Bot-IoT.csv) here
-├── results/            # Git-ignored folder where output plots are saved
-├── .gitignore          # Specifies files for Git to ignore
-├── main.py             # The main executable script
-├── README.md           # Project documentation
-└── requirements.txt    # Required Python libraries
+The project trains baseline Multi-Layer Perceptron (MLP) models and TRADES-defended MLP models for intrusion detection. The evaluation includes clean test performance and adversarial robustness under Projected Gradient Descent (PGD), Fast Gradient Sign Method (FGSM), and Carlini & Wagner (C&W) attacks.
 
+The framework supports experiments on:
+
+- NSL-KDD
+- Bot-IoT
+- UNSW-NB15
+- CICIDS2017
+
+UNSW-NB15 and CICIDS2017 are included as cross-dataset benchmarks to evaluate whether the proposed defense maintains robustness beyond the primary Bot-IoT setting.
+
+## Repository Structure
+
+```text
+adversarial-nids-framework-final/
+├── main.py
+├── main_with_unsw_nb15.py
+├── cicids2017_trades_benchmark.py
+├── requirements.txt
+├── requirements_updated.txt
+├── README.txt
+└── data/
+    └── Place dataset CSV files here
+```
+
+## Required Dataset Files
+
+Dataset files are not included in this repository due to size and redistribution constraints. Users should download the datasets from their official sources and place the required CSV files inside the `data/` folder.
+
+For UNSW-NB15:
+
+```text
+data/UNSW_NB15_training-set.csv
+data/UNSW_NB15_testing-set.csv
+```
+
+For CICIDS2017:
+
+```text
+data/Monday-WorkingHours.pcap_ISCX.csv
+data/Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv
+```
+
+For Bot-IoT:
+
+```text
+data/reduced_data_4.csv
+```
 
 ## Installation
 
-1.  **Clone the repository:**
-    ```bash
-    git clone <your-repo-url>
-    cd adversarial-nids-framework
-    ```
+Python 3.11 is recommended because TensorFlow support may not be available for newer Python versions.
 
-2.  **Create a virtual environment (recommended):**
-    ```bash
-    python -m venv venv
-    source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
-    ```
+Install the required libraries using:
 
-3.  **Install the required packages:**
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-4.  **Add your datasets** to the `data/` folder.
-
-## How to Run
-
-The main script `main.py` can be configured to run with either the NSL-KDD or Bot-IoT dataset.
-
--   Open `main.py` and find the line: `USE_BOT_IOT = False`
--   Set it to `False` to use the **NSL-KDD** dataset.
--   Set it to `True` to use the **Bot-IoT** dataset.
-
-Then, run the script from your terminal:
 ```bash
-python main.py
+py -3.11 -m pip install -r requirements_updated.txt
+```
+
+or, if Python 3.11 is the default Python version:
+
+```bash
+pip install -r requirements_updated.txt
+```
+
+## Running the UNSW-NB15 Benchmark
+
+Place the two UNSW-NB15 CSV files in the `data/` folder, then run:
+
+```bash
+py -3.11 main_with_unsw_nb15.py
+```
+
+The script saves the results in:
+
+```text
+results/table10_cross_dataset_results.csv
+results/attack_results_UNSW-NB15.csv
+results/deployment_metrics_UNSW-NB15.csv
+```
+
+## Running the CICIDS2017 Benchmark
+
+Place the required CICIDS2017 CSV files in the `data/` folder, then run:
+
+```bash
+py -3.11 cicids2017_trades_benchmark.py
+```
+
+The script saves the results in:
+
+```text
+results/table10_cicids2017_results.csv
+results/attack_results_CICIDS2017.csv
+results/deployment_metrics_CICIDS2017.csv
+```
+
+## Outputs
+
+The experiments report:
+
+- Clean accuracy
+- PGD robust accuracy
+- FGSM robust accuracy
+- C&W robust accuracy
+- TensorFlow Lite model size
+- Inference latency
+- Throughput in packets per second
+
+## Reproducibility Notes
+
+All experiments use a fixed random seed where applicable. Dataset preprocessing includes feature cleaning, label mapping, numerical normalization, and train/test splitting according to the dataset-specific protocol described in the manuscript.
+
+Large datasets, generated result files, and trained model artifacts are intentionally excluded from the repository. They can be regenerated by running the provided scripts after placing the required dataset CSV files in the `data/` folder.
